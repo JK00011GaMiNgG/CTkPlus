@@ -1,4 +1,6 @@
 import base64
+import ctypes.wintypes
+from ctypes.wintypes import LONG, LPARAM
 
 import customtkinter as ctk
 import tempfile
@@ -7,7 +9,7 @@ import uuid
 import io
 import os
 
-import ctypes.wintypes
+from ctypes import wintypes
 
 import win32api
 import win32con
@@ -20,9 +22,11 @@ from ctkadditions.titlebar.titlebar import Titlebar
 
 from ctkadditions.utils.utils import *
 from typing import *
+from wndproc import WNDPROC, WNDPROCTYPE
 
 class CTkPlus(ctk.CTk):
     _titlebar_height_reduction: Dict[int, int] = {}
+    _window_states = {}
     def __init__(self,
                  title_bar_color: str = default_title_bar_color,
                  title_color: str = default_title_color,
@@ -37,12 +41,14 @@ class CTkPlus(ctk.CTk):
 
         self._title = "CTkPlus"
         self._title_bar_color = title_bar_color
-        self._title_bar_height = 30
+        self._title_bar_height = 0
         self._title_color = title_color
         self._border_color = border_color
         self._corner_type = corner_type
         self._icon_taskbar = icon_taskbar
         self._bg_color = bg_color
+
+        self._window_type = "normal"
 
         self._disabled_titlebar = False
         self._empty_titlebar = False
@@ -52,37 +58,48 @@ class CTkPlus(ctk.CTk):
         self._last_state = None
 
         self._fullscreen = False
-        self._x, self._y, self._width, self._height, self._maximized = None, None, None, None, False
 
         self._titlebar_cxt_menu_item_id = 0
         self._titlebar_cxt_menu_commands = {}
 
         self._parent_window_handle = user32.GetParent(self.winfo_id())
 
+        self._old_wndproc = win32gui.SetWindowLong(self._parent_window_handle, win32con.GWL_WNDPROC, WNDPROCTYPE(self._wndproc))
+        self._new_wndproc = WNDPROCTYPE(self._wndproc)
+
         self._set_ctypes_attributes()
         self._set_default_attributes()
         self._set_window_proc()
 
+        self.bind("<F11>", self._f11_fullscreen)
+
         self.title(self._title)
-        # self.titlebar = Titlebar(self, self._title_bar_color, self._title_bar_height)
-        self.__fullscreen_titlebar = ctk.CTkFrame(self, height=self._title_bar_height+1, width=screenWidth, fg_color=self._title_bar_color, corner_radius=0)
-        self.bind("<Map>", lambda event:self._maximization_detection(event))
+
         self.update()
 
     def _set_window_proc(self):
-        pass
+        win32gui.SetWindowLong(self._parent_window_handle, win32con.GWL_WNDPROC, self._new_wndproc)
 
-    def _window_proc(self, hwnd, msg, wparam, lparam):
+    def _wndproc(self, hwnd, msg, wparam, lparam):
         if msg == win32con.WM_SYSCOMMAND and wparam in self._titlebar_cxt_menu_commands:
             self._titlebar_cxt_menu_commands[wparam]()
-        return win32gui.CallWindowProc(hwnd, msg, wparam, lparam)
+            return 0
+        elif msg == win32con.WM_PAINT:
+            return 0
+        elif msg == win32con.WM_DESTROY:
+            return 0
+        # return self._default_wndproc(msg, wparam, lparam)
+        extra_stuff = (self._title_bar_color, self._title_bar_height, self._title_color, self._old_wndproc, self._titlebar_cxt_menu_commands)
+        return WNDPROC(extra_stuff).wndproc(hwnd, msg, wparam, lparam)
+
+    def _default_wndproc(self, msg, wparam, lparam):
+        return win32gui.CallWindowProc(self._old_wndproc, self._parent_window_handle, msg, wparam, lparam)
 
     def _set_default_attributes(self):
         if self._frameless:
             self.enable_empty_titlebar()
             self.disable_titlebar()
-        self.protocol("WM_DELETE_WINDOW", noop) if self._unclosable else None
-
+        self.protocol("WM_DELETE_WINDOW", lambda:None) if self._unclosable else None
         super().config(bg=self._bg_color)
 
     def _set_ctypes_attributes(self):
@@ -116,26 +133,12 @@ class CTkPlus(ctk.CTk):
             ctypes.sizeof(ctypes.c_int)
         )
 
-    def _maximization_detection(self, event=None):
-        if self.wm_state() != self._last_state:
-            # self.titlebar.set_titlebar_height(23) if self.wm_state() == "zoomed" else self.titlebar.set_titlebar_height(30)
-            self._last_state = self.wm_state()
-
     def _enable_button(self, button):
         enable_button = ctypes.CDLL(f'titlebar\\cpp\\enable_button.dll')
         if button in ('close', 'minimize', 'maximize'):
             func = getattr(enable_button, f'enable{button.capitalize()}Button')
             func.argtypes, func.restype = [ctypes.wintypes.HWND], None
             func(self._parent_window_handle)
-
-    def _toggle_titlebar_buttons(self):
-        # if self._disabled_titlebar:
-        #     self.titlebar._hide_children()
-        # elif self._empty_titlebar:
-        #     self.titlebar._hide_children()
-        # else:
-        #     self.titlebar._show_children()
-        pass
 
     def enable_titlebar(self):
         if globals().get("old_wndproc") is not None:
@@ -156,7 +159,6 @@ class CTkPlus(ctk.CTk):
 
         user32.SetWindowPos(self._parent_window_handle, 0, 0, 0, 0, 0, 2 | 1 | 4 | 32)
         self._disabled_titlebar = False
-        self._toggle_titlebar_buttons()
 
     def enable_empty_titlebar(self):
         old_style = user32.GetWindowLongPtrA(self._parent_window_handle, -16)
@@ -165,7 +167,6 @@ class CTkPlus(ctk.CTk):
         user32.SetWindowPos(self._parent_window_handle, 0, 0, 0, 0, 0, 2 | 1 | 4 | 32)
         self.__title("")
         self._empty_titlebar = True
-        self._toggle_titlebar_buttons()
 
     def disable_titlebar(self):
         def handle(hwnd: int, msg: int, wp: int, lp: int) -> int:
@@ -213,7 +214,6 @@ class CTkPlus(ctk.CTk):
 
         user32.SetWindowPos(self._parent_window_handle, 0, 0, 0, 0, 0, 2 | 1 | 4 | 32)
         self._disabled_titlebar = True
-        self._toggle_titlebar_buttons()
 
     def disable_empty_titlebar(self):
         old_style = user32.GetWindowLongPtrA(self._parent_window_handle, -16)
@@ -221,7 +221,6 @@ class CTkPlus(ctk.CTk):
         user32.SetWindowLongPtrW(self._parent_window_handle, -16, new_style)
         user32.SetWindowPos(self._parent_window_handle, 0, 0, 0, 0, 0, 2 | 1 | 4 | 32)
         self._empty_titlebar = False
-        self._toggle_titlebar_buttons()
 
     def _disable_button(self, button):
         disable_button = ctypes.CDLL(f'titlebar\\cpp\\disable_button.dll')
@@ -247,20 +246,6 @@ class CTkPlus(ctk.CTk):
             4,
         )
 
-    # def add_button(self, text, command, bind=None, icon=None):
-    #     h_menu = win32gui.GetSystemMenu(self._parent_window_handle, False)
-    #     self._titlebar_cxt_menu_commands[self._titlebar_cxt_menu_item_id] = command
-    #     win32gui.InsertMenu(h_menu, self._titlebar_cxt_menu_item_id,
-    #                         win32con.MF_BYPOSITION | win32con.MF_STRING,
-    #                         self._titlebar_cxt_menu_item_id, text)
-    #     self._titlebar_cxt_menu_item_id += 1
-    #
-    #     if len(self._titlebar_cxt_menu_commands) != 1:
-    #         win32gui.RemoveMenu(h_menu, len(self._titlebar_cxt_menu_commands), win32con.MF_BYPOSITION)
-    #
-    #     win32gui.InsertMenu(h_menu, len(self._titlebar_cxt_menu_commands),
-    #                         win32con.MF_BYPOSITION | win32con.MF_SEPARATOR, 0, "")
-
     def add_button(self, text, command):
         h_menu = win32gui.GetSystemMenu(self._parent_window_handle, False)
         self._titlebar_cxt_menu_commands[self._titlebar_cxt_menu_item_id] = command
@@ -269,7 +254,6 @@ class CTkPlus(ctk.CTk):
         if self._titlebar_cxt_menu_item_id > 1:
             win32gui.RemoveMenu(h_menu, self._titlebar_cxt_menu_item_id, win32con.MF_BYPOSITION)
         win32gui.InsertMenu(h_menu, self._titlebar_cxt_menu_item_id, win32con.MF_BYPOSITION | win32con.MF_SEPARATOR, 0, "")
-        win32gui.DrawMenuBar(self._parent_window_handle)
 
     def close_button(self, state: Optional[Union[Literal['disabled'], Literal['normal']]] = None, bind: Union[Callable[[], Any], None] = None, **kwargs):
         self._disable_button('close') if state == 'disabled' else self._enable_button('close') if state == 'normal' else None
@@ -295,13 +279,13 @@ class CTkPlus(ctk.CTk):
     def wm_title(self, string=None, style=1):
         if string in [None, ""]:
             self._title = ""
-            return super().title("") # self.titlebar.tk.call('wm', 'title', self._w, "")
+            return super().title("")
         else:
             self._title = string
-            return super().title(self.style_text(string, style-1)) # self.titlebar.tk.call('wm', 'title', self._w, self.style_text(string, style-1))
+            return super().title(self.style_text(string, style-1))
 
     def __title(self, string):
-        return super().title(string) # self.titlebar.tk.call('wm', 'title', self._w, string)
+        return super().title(string)
 
     title = wm_title
 
@@ -339,7 +323,6 @@ class CTkPlus(ctk.CTk):
             os.remove(temp_file_name)
 
     def set_opacity(self, opacity: float):
-        # self.titlebar.attributes("-alpha", opacity)
         old_ex_style = user32.GetWindowLongPtrA(self._parent_window_handle, -20)
         new_ex_style = old_ex_style | 524288
         user32.SetWindowLongPtrW(self._parent_window_handle, -20, new_ex_style)
@@ -347,16 +330,19 @@ class CTkPlus(ctk.CTk):
             opacity = int(opacity * 255)
         user32.SetLayeredWindowAttributes(self._parent_window_handle, 0, opacity, 2)
 
-    def set_preset(self, preset):
-        if preset == "normal":
-            self.minimize_button(state="normal")
+    def set_window_type(self, type):
+        if type == "normal":
+            self._window_type = "normal"
             self.maximize_button(state="normal")
-            self.close_button(state="normal")
-        elif preset == "toolwindow":
-            self.minimize_button(state="disabled")
+            self.minimize_button(state="normal")
+        elif type == "toolwindow":
+            self._window_type = "tool"
             self.maximize_button(state="disabled")
-        elif preset == "tabbedwindow":
-            pass
+            self.minimize_button(state="disabled")
+        elif type == "tabbedwindow":
+            self._window_type = "tabbed"
+        else:
+            raise SyntaxError("That is not a valid window type. Valid window types are \"normal\", \"toolwindow\", and \"tabbedwindow\".")
 
     def close(self):
         self.destroy()
@@ -369,77 +355,33 @@ class CTkPlus(ctk.CTk):
 
     def fullscreen(self, fullscreen):
         if fullscreen:
-            if not self._fullscreen:
-                self._maximized = self.state() == "zoomed"
-                if not self._maximized:
-                    self._x, self._y, self._width, self._height = self.winfo_x(), self.winfo_y(), self.winfo_width(), self.winfo_height()
-                else:
-                    self.state("normal")
-                self.geometry(f"{screenWidth}x{screenHeight}")
-                ctypes.windll.user32.SetWindowPos(self._parent_window_handle, 0, 0, 0, 0, 0, 0x0001 | 0x0004)
-                self.overrideredirect(True)
+            placement = win32gui.GetWindowPlacement(self._parent_window_handle)
+            style = win32gui.GetWindowLong(self._parent_window_handle, win32con.GWL_STYLE)
+            ex_style = win32gui.GetWindowLong(self._parent_window_handle, win32con.GWL_EXSTYLE)
+            CTkPlus._window_states[self._parent_window_handle] = (placement, style, ex_style)
+            win32gui.SetWindowLong(self._parent_window_handle, win32con.GWL_STYLE, style & ~(win32con.WS_CAPTION | win32con.WS_THICKFRAME))
+            win32gui.SetWindowLong(self._parent_window_handle, win32con.GWL_EXSTYLE, ex_style & ~(win32con.WS_EX_DLGMODALFRAME | win32con.WS_EX_WINDOWEDGE))
+            win32gui.ShowWindow(self._parent_window_handle, win32con.SW_MAXIMIZE)
         else:
-            self._fullscreen_titlebar(False)
-            if self._fullscreen:
-                if not self._maximized:
-                    self.geometry(f"{self._x}x{self._y}+{self._width}+{self._height}")
-                else:
-                    self.state("zoomed")
-                self.overrideredirect(False)
-        self._fullscreen = not self._fullscreen
+            if self._parent_window_handle in CTkPlus._window_states:
+                placement, style, ex_style = CTkPlus._window_states.pop(self._parent_window_handle)
+                win32gui.SetWindowLong(self._parent_window_handle, win32con.GWL_STYLE, style)
+                win32gui.SetWindowLong(self._parent_window_handle, win32con.GWL_EXSTYLE, ex_style)
+                win32gui.SetWindowPlacement(self._parent_window_handle, placement)
+                win32gui.ShowWindow(self._parent_window_handle, win32con.SW_SHOWNORMAL)
+        self._fullscreen = fullscreen
 
-    def _fullscreen_titlebar_activation(self, event):
-        print("triggered")
-        if event.y < 10:
-            print("1")
-            self._fullscreen_titlebar(True)
-        elif event.y > 10:
-            print("2")
-            self._fullscreen_titlebar(False)
-        else:
-            print("3")
+    def _f11_fullscreen(self, event):
+        self.fullscreen(not self._fullscreen)
 
-    def _fullscreen_titlebar(self, enabled):
-        if enabled:
-            if self._fullscreen:
-                self.__fullscreen_titlebar.place(x=0, y=0)
-                self.__fullscreen_titlebar.lift()
-                hvcolor = generate_hover_color(self._title_bar_color)
-                closeimg = Image.open(BytesIO(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAYAAACNMs+9AAAAAXNSR0IArs4c6QAAAD9JREFUKFNj/P///39GRkZGBjwArAYkj08xTA5uEjbFyGIoViJLoGvEcBtIAcg56O4mTyFRVhPlGaKCh9gABwC+yEgDfxpCIAAAAABJRU5ErkJggg==")))
-                maximizeimg = Image.open(BytesIO(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAYAAACNMs+9AAAAAXNSR0IArs4c6QAAAEdJREFUKFOVkEkKADAIA5v/PzolQkoR7eLFg8MYgvEwJImOiyMA7yMoieDYJ6NvglswC/5ABd7fVHGW0XAXJ8BcRWk0dOt9Aj2LKAfl+/RJAAAAAElFTkSuQmCC")))
-                minimizeimg = Image.open(BytesIO(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAoAAAABCAYAAADn9T9+AAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsEAAA7BAbiRa+0AAAGHaVRYdFhNTDpjb20uYWRvYmUueG1wAAAAAAA8P3hwYWNrZXQgYmVnaW49J++7vycgaWQ9J1c1TTBNcENlaGlIenJlU3pOVGN6a2M5ZCc/Pg0KPHg6eG1wbWV0YSB4bWxuczp4PSJhZG9iZTpuczptZXRhLyI+PHJkZjpSREYgeG1sbnM6cmRmPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5LzAyLzIyLXJkZi1zeW50YXgtbnMjIj48cmRmOkRlc2NyaXB0aW9uIHJkZjphYm91dD0idXVpZDpmYWY1YmRkNS1iYTNkLTExZGEtYWQzMS1kMzNkNzUxODJmMWIiIHhtbG5zOnRpZmY9Imh0dHA6Ly9ucy5hZG9iZS5jb20vdGlmZi8xLjAvIj48dGlmZjpPcmllbnRhdGlvbj4xPC90aWZmOk9yaWVudGF0aW9uPjwvcmRmOkRlc2NyaXB0aW9uPjwvcmRmOlJERj48L3g6eG1wbWV0YT4NCjw/eHBhY2tldCBlbmQ9J3cnPz4slJgLAAAAEElEQVQYV2P8////fwYiAACZuAP+/Bq/sgAAAABJRU5ErkJggg==")))
-                closeimage = ctk.CTkImage(light_image=closeimg, dark_image=closeimg, size=(10, 10))
-                closebutton = ctk.CTkButton(self.__fullscreen_titlebar, text="", image=closeimage, width=45, height=self._title_bar_height, corner_radius=0, fg_color=self._title_bar_color, hover_color="#e81123", command=self.close)
-                closebutton.place(x=screenWidth-45)
-                maximizeimage = ctk.CTkImage(light_image=maximizeimg, dark_image=maximizeimg, size=(10, 10))
-                minimizebutton = ctk.CTkButton(self.__fullscreen_titlebar, text="", image=maximizeimage, width=45, height=self._title_bar_height, corner_radius=0, fg_color=self._title_bar_color, hover_color=hvcolor, command=lambda:self.fullscreen(False))
-                minimizebutton.place(x=screenWidth-91)
-                minimizeimage = ctk.CTkImage(light_image=minimizeimg, dark_image=minimizeimg, size=(10, 1))
-                minimizebutton = ctk.CTkButton(self.__fullscreen_titlebar, text="", image=minimizeimage, width=45, height=self._title_bar_height, corner_radius=0, fg_color=self._title_bar_color, hover_color=hvcolor, command=lambda:self.minimize(True))
-                minimizebutton.place(x=screenWidth-137)
-                titlelabel = ctk.CTkLabel(self.__fullscreen_titlebar, text=self._title, height=self._title_bar_height)
-                titlelabel.place(x=10)
-        else:
-            self.__fullscreen_titlebar.lower()
-            self.__fullscreen_titlebar.place_forget()
-
-    def f11_fullscreen(self, event):
-        self.fullscreen(self._fullscreen)
-
-    def overrideredirect(self, enabled):
-        style = ctypes.windll.user32.GetWindowLongW(self._parent_window_handle, -16)
-        new_style = style & ~(0x00C00000 | 0x00040000) if enabled else style | 0x00C00000 | 0x00040000
-        ctypes.windll.user32.SetWindowLongW(self._parent_window_handle, -16, new_style)
-        ctypes.windll.user32.SetWindowPos(self._parent_window_handle, 0, 0, 0, 0, 0, 0x0002 | 0x0001 | 0x0004 | 0x0020)
-        dwmapi.DwmSetWindowAttribute(self._parent_window_handle, 33, ctypes.byref(ctypes.c_int(1 if enabled else corner_types.get(self._corner_type, None))), ctypes.sizeof(ctypes.c_int))
+    def get_hwnd(self):
+        return self._parent_window_handle
 
 root = CTkPlus(
-    corner_type="round"
+    title_color="#00ff00"
 )
 root.title("Hello")
 root.geometry('600x600+100+100')
-
-root.set_preset("toolwindow")
 
 # titlebarButton = CTkTitlebarButton(root.titlebar, text="Hi")
 # titlebarButton.pack()
@@ -464,8 +406,6 @@ def c():
 
 def d():
     print("Hello")
-
-root.close_button(bind=lambda:d)
 
 root.add_button("Say Hello", lambda: print("Hello!"))
 root.add_button("Command", d)
@@ -504,11 +444,5 @@ fullscreen.pack(pady=y)
 
 fullscreen2 = ctk.CTkButton(root, text="Fullscreen Disabled", command=lambda:root.fullscreen(False))
 fullscreen2.pack(pady=y)
-
-n = ctk.CTkButton(root, text="Fullscreen Titlebar Enabled", command=lambda:root._fullscreen_titlebar(True))
-n.pack(pady=y)
-
-o = ctk.CTkButton(root, text="Fullscreen Titlebar Disabled", command=lambda:root._fullscreen_titlebar(False))
-o.pack(pady=y)
 
 root.mainloop()

@@ -1,7 +1,18 @@
 import ctypes
+import os
+import tempfile
 import winreg
 import socket
-from ctypes.wintypes import UINT, HWND
+import ctypes
+from io import BytesIO
+
+from PIL import Image
+from ctypes import wintypes
+from ctypes.wintypes import HWND, UINT
+from win32ui import *
+from win32gui import *
+from win32api import *
+from win32con import *
 
 class PWINDOWPOS(ctypes.Structure):
     _fields_ = [
@@ -157,19 +168,20 @@ class ScreenDepth:
     def __len__(self):
         return len(self.monitor_depths)
 
+def image_hicon(img: Image.Image):
+    buffer = BytesIO()
+    img = img.convert("RGBA")
+    img = img.resize((16, 16), Image.LANCZOS)
+    img.save(buffer, format='ICO')
+    buffer.seek(0)
+    return buffer.read()
+
 def get_windows_theme():
     try:
-        key = winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER,
-            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
-        )
-
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
         value, regtype = winreg.QueryValueEx(key, "AppsUseLightTheme")
-
         winreg.CloseKey(key)
-
         return "light" if value == 1 else "dark"
-
     except FileNotFoundError:
         return "unknown"
     except Exception as e:
@@ -189,6 +201,31 @@ def hex_to_int(hex_color: str) -> int:
     r, g, b = int(hex_color[1:3], 16), int(hex_color[3:5], 16), int(hex_color[5:7], 16)
     return (b << 16) | (g << 8) | r
 
+def swap_r_b_int(_hex: int) -> int:
+    red = (_hex >> 16) & 0xFF
+    green = (_hex >> 8) & 0xFF
+    blue = _hex & 0xFF
+    swapped_hex = (blue << 16) | (green << 8) | red
+    return swapped_hex
+
+def generate_hover_color_int(_hex: int) -> int:
+    blue = (_hex >> 16) & 0xFF
+    green = (_hex >> 8) & 0xFF
+    red = _hex & 0xFF
+    hover_blue = min(blue + 13.5, 255)
+    hover_green = min(green + 13.5, 255)
+    hover_red = min(red + 13.5, 255)
+    return (int(hover_blue) << 16) | (int(hover_green) << 8) | int(hover_red)
+
+def generate_opposite_color_int(_hex: int) -> int:
+    r = (_hex >> 16) & 0xFF
+    g = (_hex >> 8) & 0xFF
+    b = _hex & 0xFF
+    r_opposite = 255 - r
+    g_opposite = 255 - g
+    b_opposite = 255 - b
+    return (r_opposite << 16) | (g_opposite << 8) | b_opposite
+
 def generate_hover_color(hex_color):
     hex_color = hex_color.lstrip('#')
     first_color = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
@@ -198,12 +235,27 @@ def generate_hover_color(hex_color):
 def generate_opposite_color(hex_color):
     return "#{:02X}{:02X}{:02X}".format(*(255 - int(hex_color.lstrip("#")[i:i+2], 16) for i in (0, 2, 4)))
 
-def noop():
-    pass
+def darken_color(color, percentage):
+    r = (color >> 16) & 0xFF
+    g = (color >> 8) & 0xFF
+    b = color & 0xFF
+    factor = 1 - percentage / 100
+    r = int(r * factor)
+    g = int(g * factor)
+    b = int(b * factor)
+    return (r << 16) | (g << 8) | b
+
+def lighten_color(color, percentage):
+    r, g, b = color
+    factor = percentage / 100
+    return (min(255, int(r + (255 - r) * factor)), min(255, int(g + (255 - g) * factor)), min(255, int(b + (255 - b) * factor)))
 
 user32 = ctypes.windll.user32
 shell32 = ctypes.windll.shell32
 dwmapi = ctypes.windll.dwmapi
+gdi32 = ctypes.windll.gdi32
+uxtheme = ctypes.windll.uxtheme
+kernel32 = ctypes.windll.kernel32
 
 screenWidth, screenHeight = user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
 
